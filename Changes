@@ -1,5 +1,18 @@
 Revision history for Perl extension UDPM.
 
+0.80  Tue Jan  7 16:10:15 2003
+    	- PATH variable fixes for Taint support
+	- expanded ./t/?.t tests to incl. ASCII widget tests.
+	- added 'sttybin' and 'use_stderr' (initial) attributes.
+	- center text alignment fixed
+	- escape ` along with " ( ' doesn't need to be escaped...)
+	- repeater-menu bug (:e and :h in menu many times...) fixed
+	- udpm_demo.pl typo fix
+	- fixed 'sticky text attr' bug
+	- fixed whiptail infobox 'DISPLAY' bug
+	- fselect() improvements
+	- Added four "event" handlers; "HELP", "EXTRA", "ESC", "CANCEL"
+
 0.75  Mon Dec 23 00:42:38 2002
 	- Initial CPAN Packaging.
 

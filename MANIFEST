@@ -4,5 +4,6 @@ MANIFEST
 README
 UDPM.pm
 t/1.t
+t/2.t
 examples/udpm-demo.pl
 examples/nautilus_debug.pl

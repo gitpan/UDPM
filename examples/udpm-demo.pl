@@ -2,6 +2,7 @@
 use strict;
 use warnings;
 use diagnostics;
+use lib ".";
 use UDPM;
 
 
@@ -9,15 +10,37 @@ use UDPM;
 # script works with the different dialog variants. This is my
 # "test-every-feature-possible" script.
 
-my $d = new UDPM ({'colours'=>1,'cr-wrap'=>1,'no-shadow'=>1,'auto-clear'=>1,'auto-scale'=>1,
-		   'ascii'=>0,'max-scale'=>79,'backtitle'=>'UDPM Demo ('.$UDPM::VERSION.')',
-		   'beep'=>0,
+my $d = new UDPM ({'colours'=>1,'cr-wrap'=>1,'no-shadow'=>1,'auto-clear'=>0,'auto-scale'=>1,
+		   'height'=>22,'ascii'=>0,'max-scale'=>79,'backtitle'=>'UDPM Demo ('.$UDPM::VERSION.')',
+		   'ESC-SUB'=>\&ESC,'CANCEL-SUB'=>\&CANCEL,'EXTRA-SUB'=>\&EXTRA,'HELP-SUB'=>\&HELP,
+#		   'beep'=>undef,
+#		   'dialogbin'=>'/usr/bin/dialog'
+#		   'dialogbin'=>'/usr/bin/whiptail'
+#		   'dialogbin'=>'/usr/bin/gdialog'
+#		   'dialogbin'=>'/usr/bin/kdialog'
+		  });
+my $d2 = new UDPM ({'colours'=>1,'cr-wrap'=>1,'no-shadow'=>1,'auto-clear'=>0,'auto-scale'=>1,
+		   'height'=>22,'ascii'=>0,'max-scale'=>79,'backtitle'=>'UDPM Callback Demo ('.$UDPM::VERSION.')',
+#		   'beep'=>undef,
 #		   'dialogbin'=>'/usr/bin/dialog'
 #		   'dialogbin'=>'/usr/bin/whiptail'
 #		   'dialogbin'=>'/usr/bin/gdialog'
 #		   'dialogbin'=>'/usr/bin/kdialog'
 		  });
 
+
+sub HELP {
+  $d2->infobox({'title'=>'HELP','sleep'=>2,'text'=>'this is a coderef being executed because you pressed <help>!'});
+}
+sub EXTRA {
+  $d2->infobox({'title'=>'EXTRA','sleep'=>2,'text'=>'this is a coderef being executed because you pressed <extra>!'});
+}
+sub ESC {
+  $d2->infobox({'title'=>'ESC','sleep'=>2,'text'=>'this is a coderef being executed because you pressed <esc>!'});
+}
+sub CANCEL {
+  $d2->infobox({'title'=>'CANCEL','sleep'=>2,'text'=>'this is a coderef being executed because you pressed <cancel>!'});
+}
 
 # I un-comment this when debbuging the list widgets...
 #WALKTHROUGH(); exit();
@@ -238,9 +261,9 @@ while ($m ne "Exit") {
 
     } elsif ($m eq "12") {
 
-      my $path = $d->fselect({'title'=>'fselect widget',
+      my $path = $d->fselect({'title'=>'fselect widget','height'=>22,'list-height'=>12,
 			      'path'=>'./'});
-      $d->infobox({'title'=>'infobox widget','sleep'=>1,
+      $d->infobox({'title'=>'infobox widget','sleep'=>2,
 		   'text'=>'you selected: "'.$path.'"'});
 
     } elsif ($m eq "13") {
@@ -251,7 +274,7 @@ while ($m ne "Exit") {
 				      'tag3','description three','off'
 				     ]
 			    });
-      $d->infobox({'title'=>'infobox widget','sleep'=>1,
+      $d->infobox({'title'=>'infobox widget','sleep'=>2,
 		   'text'=>'you selected: "'.join('" "',@l).'"'});
 
     }
@@ -367,7 +390,7 @@ my $menu = ['01','one',		'02','two',	'03','three',
     $d->menu({'title'=>'menu','text'=>'silently invalid','menu'=>['1','one','off','2','two','off']});
     #And these are invalid with a msgbox displaying an error message:
     $d->menu({'title'=>'menu','text'=>'flat out invalid','list'=>['1','one','2','two','3']});
-    $d->checklist('title'=>'menu','text'=>'flat out invalid','menu'=>['1','one','ogg','2','two','3']});
+    $d->checklist({'title'=>'menu','text'=>'flat out invalid','menu'=>['1','one','ogg','2','two','3']});
   }
 
   if ($d->noyes({'title'=>'noyes() widget',

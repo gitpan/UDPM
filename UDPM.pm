@@ -6,9 +6,15 @@ use warnings;
 use diagnostics;
 use FileHandle;
 use File::Basename;
+use Cwd 'abs_path';
 use Carp;
 
-our $VERSION = '0.75';
+our $VERSION = '0.80';
+
+#
+# TODO:
+# o tailboxbg() support
+#
 
 #
 # Please read the POD for copyright and licensing issues.
@@ -22,6 +28,7 @@ BEGIN { use vars qw($VERSION); }
 
 my $ATTRIBUTES = [ 'title',
 		   'backtitle',
+		   'text',
 		   'height',
 		   'width',
 		   'menu-height',
@@ -73,6 +80,7 @@ sub new {
 
   $self->{'dialogrc'}		= $cfg->{'dialogrc'}		|| undef();
   $self->{'dialogbin'}		= $cfg->{'dialogbin'}		|| undef();
+  $self->{'sttybin'}		= $cfg->{'sttybin'}		|| '/bin/stty';
   $self->{'envpaths'}		= $cfg->{'envpaths'}		|| ['/bin/','/usr/bin','/usr/local/bin'];
   $self->{'variants'}		= $cfg->{'variants'}		|| ['dialog','whiptail'];
   $self->{'gui-variants'}	= $cfg->{'gui-variants'}	|| ['gdialog','kdialog'];
@@ -85,6 +93,7 @@ sub new {
   $self->{'tail'}		= $cfg->{'tail'}		|| '/usr/bin/tail';
   $self->{'tailopt'}		= $cfg->{'tailopt'}		|| '-f';
   $self->{'tmpdir'}		= $cfg->{'tmpdir'}		|| '/tmp';
+  $self->{'use_stderr'}		= $cfg->{'use_stderr'}		|| 0;
 
   $self->__WHICH_DIALOG();
   $self->{'dialog'} = "DIALOGRC=".$self->{'dialogrc'}." ".$self->{'dialog'}
@@ -97,8 +106,8 @@ sub new {
 
   $self->{'title'}		= $cfg->{'title'}		|| undef();
   $self->{'backtitle'}		= $cfg->{'backtitle'}		|| undef();
-  $self->{'height'}		= $cfg->{'height'}		|| 10;
-  $self->{'width'} 		= $cfg->{'width'}		|| 40;
+  $self->{'height'}		= $cfg->{'height'}		|| 18;
+  $self->{'width'} 		= $cfg->{'width'}		|| 76;
   $self->{'list-height'}	= ($cfg->{'list-height'}||$cfg->{'menu-height'}) || 3;
   $self->{'menu-height'}	= ($cfg->{'menu-height'}||$cfg->{'list-height'}) || 3;
   $self->{'defaultno'}		= $cfg->{'defaultno'}		|| 0;
@@ -133,6 +142,12 @@ sub new {
   $self->{'scrolltext'}		= $cfg->{'scrolltext'}		|| 0;
   $self->{'noitem'}	       	= $cfg->{'noitem'}		|| 0;
 
+  $self->{'handlers'} = {};
+  $self->{'handlers'}->{'HELP'}	= $cfg->{'HELP-SUB'}		|| undef();
+  $self->{'handlers'}->{'EXTRA'}= $cfg->{'EXTRA-SUB'}		|| undef();
+  $self->{'handlers'}->{'ESC'} 	= $cfg->{'ESC-SUB'}		|| undef();
+  $self->{'handlers'}->{'CANCEL'} = $cfg->{'CANCEL-SUB'}	|| undef();
+
   my $clone = {};
   foreach my $key (keys(%$self)) { $clone->{$key} = $self->{$key}; }
   $self->{'clone'} = $clone;
@@ -158,6 +173,7 @@ sub __CAT_ONCE {
     open(CAT,"<".$file) or return($file);
     $text = <CAT>;
     close($file);
+    $/ = $TS; #<-- bug! (was missing, now ok...)
     unlink($file);
     return($text);
   }
@@ -245,10 +261,12 @@ sub __debug_this {
 sub __GET_DIR {
   my $self = shift();
   my $path = shift() || return();
+  my $pref = shift();
   my (@listing,@list);
   opendir(GETDIR,$path) or return("failed to read directory: ".$path);
   my @dir_data = readdir(GETDIR);
   closedir(GETDIR);
+  if ($pref) { push(@listing,@{$pref}); }
   foreach my $dir (sort(grep { -d $path."/".$_ } @dir_data)) { push(@listing,$dir."/"); }
   foreach my $item (sort(grep { !-d $path."/".$_ } @dir_data)) { push(@listing,$item); }
   my $c = 1;
@@ -275,30 +293,40 @@ sub __TRANSLATE {
   } else {
     if ($self->{'auto-scale'}) {
       foreach my $line (@array) {
-	my $ln = $line;
-	$ln =~ s!\[A\=\w+\]!!gi;
-	$self->{'width'} = length($line) + 5
-	 if ($self->{'width'} - 5) < length($line)
-	  && (length($line) <= $self->{'max-scale'});
+	my $s_line = $self->__TRANSLATE_CLEAN($line);
+	$s_line =~ s!\[A\=\w+\]!!gi;
+	$self->{'width'} = length($s_line) + 5
+	 if ($self->{'width'} - 5) < length($s_line)
+	  && (length($s_line) <= $self->{'max-scale'});
       }
     }
     foreach my $line (@array) {
       my $pad;
+      my $s_line = $self->__TRANSLATE_CLEAN($line);
       if ($line =~ /\[A\=(\w+)\]/i) {
 	my $align = $1;
 	$line =~ s!\[A\=\w+\]!!gi;
 	if (uc($align) eq "CENTER" || uc($align) eq "C") {
-	  $pad = ((($self->{'width'} - 5) - length($line)) / 2);
+	  $pad = ((($self->{'width'} - 5) - length($s_line)) / 2);
 	} elsif (uc($align) eq "LEFT" || uc($align) eq "L") {
-	  $pad = "";
+	  $pad = 0;
 	} elsif (uc($align) eq "RIGHT" || uc($align) eq "R") {
-	  $pad = (($self->{'width'} - 5) - length($line));
+	  $pad = (($self->{'width'} - 5) - length($s_line));
 	}
       }
       if ($pad) { $text .= (" " x $pad).$line.'\n'; }
       else { $text .= $line.'\n'; }
     }
+    $text =~ s!"!\\"!gm;
+    $text =~ s!`!\\`!gm;
   }
+  $text = $self->__TRANSLATE_FILTER($text);
+  return($text);
+}
+
+sub __TRANSLATE_FILTER {
+  my $self = shift();
+  my $text = shift() || return();
   if ($self->is_cdialog() && $self->{'colours'}) {
     $text =~ s!\[C=black\]!\\Z0!gmi;
     $text =~ s!\[C=red\]!\\Z1!gmi;
@@ -316,38 +344,44 @@ sub __TRANSLATE {
     $text =~ s!\[/R\]!\\ZR!gmi;
     $text =~ s!\[N\]!\\Zn!gmi;
   } else {
-    $text =~ s!\\Z0!!gmi;
-    $text =~ s!\\Z1!!gmi;
-    $text =~ s!\\Z2!!gmi;
-    $text =~ s!\\Z3!!gmi;
-    $text =~ s!\\Z4!!gmi;
-    $text =~ s!\\Z5!!gmi;
-    $text =~ s!\\Z6!!gmi;
-    $text =~ s!\\Z7!!gmi;
-    $text =~ s!\\Zb!!gmi;
-    $text =~ s!\\ZB!!gmi;
-    $text =~ s!\\Zu!!gmi;
-    $text =~ s!\\ZU!!gmi;
-    $text =~ s!\\Zr!!gmi;
-    $text =~ s!\\ZR!!gmi;
-    $text =~ s!\\Zn!!gmi;
-    $text =~ s!\[C=black\]!!gmi;
-    $text =~ s!\[C=red\]!!gmi;
-    $text =~ s!\[C=green\]!!gmi;
-    $text =~ s!\[C=yellow\]!!gmi;
-    $text =~ s!\[C=blue\]!!gmi;
-    $text =~ s!\[C=magenta\]!!gmi;
-    $text =~ s!\[C=cyan\]!!gmi;
-    $text =~ s!\[C=white\]!!gmi;
-    $text =~ s!\[B\]!!gmi;
-    $text =~ s!\[/B\]!!gmi;
-    $text =~ s!\[U\]!!gmi;
-    $text =~ s!\[/U\]!!gmi;
-    $text =~ s!\[R\]!!gmi;
-    $text =~ s!\[/R\]!!gmi;
-    $text =~ s!\[N\]!!gmi;
+    $text = $self->__TRANSLATE_CLEAN($text);
   }
-  $text =~ s!"!\\"!gm unless $self->{'ascii'};
+  return($text);
+}
+sub __TRANSLATE_CLEAN {
+  my $self = shift();
+  my $text = shift();
+  $text =~ s!\\Z0!!gmi;
+  $text =~ s!\\Z1!!gmi;
+  $text =~ s!\\Z2!!gmi;
+  $text =~ s!\\Z3!!gmi;
+  $text =~ s!\\Z4!!gmi;
+  $text =~ s!\\Z5!!gmi;
+  $text =~ s!\\Z6!!gmi;
+  $text =~ s!\\Z7!!gmi;
+  $text =~ s!\\Zb!!gmi;
+  $text =~ s!\\ZB!!gmi;
+  $text =~ s!\\Zu!!gmi;
+  $text =~ s!\\ZU!!gmi;
+  $text =~ s!\\Zr!!gmi;
+  $text =~ s!\\ZR!!gmi;
+  $text =~ s!\\Zn!!gmi;
+  $text =~ s!\[C=black\]!!gmi;
+  $text =~ s!\[C=red\]!!gmi;
+  $text =~ s!\[C=green\]!!gmi;
+  $text =~ s!\[C=yellow\]!!gmi;
+  $text =~ s!\[C=blue\]!!gmi;
+  $text =~ s!\[C=magenta\]!!gmi;
+  $text =~ s!\[C=cyan\]!!gmi;
+  $text =~ s!\[C=white\]!!gmi;
+  $text =~ s!\[B\]!!gmi;
+  $text =~ s!\[/B\]!!gmi;
+  $text =~ s!\[U\]!!gmi;
+  $text =~ s!\[/U\]!!gmi;
+  $text =~ s!\[R\]!!gmi;
+  $text =~ s!\[/R\]!!gmi;
+  $text =~ s!\[N\]!!gmi;
+  $text =~ s!\[A=\w+\]!!gmi;
   return($text);
 }
 
@@ -401,7 +435,7 @@ sub __TEST_LIST_ARGS {
 #: this is the dynamic 'Colon Command Help'
 sub __ASCII_NAV_HELP {
   my $self = shift();
-  print STDOUT ("~" x 79)."
+  my $head = "
 Colon Commands:
 
 :?\t\t\tThis help message
@@ -411,10 +445,37 @@ Colon Commands:
 
 :esc :escape\t\tSend the [Esc] signal
 ";
-  if ($self->{'extra-button'} || $self->{'extra-label'}) { print STDOUT ":e :extra\t\tSend the [Extra] signal\n"; }
-  if (!$self->{'nocancel'}) { print STDOUT ":c :cancel\t\tSend the [Cancel] signal\n"; }
-  if ($self->{'help-button'} || $self->{'help-label'}) { print STDOUT ":h :help\t\tSend the [Help] signal\n"; }
-  print STDOUT ("~" x 79)."\n";
+  if ($self->{'use_stderr'}) {
+    print STDERR ("~" x 79).$head;
+  } else {
+    print STDOUT ("~" x 79).$head;
+  }
+  if ($self->{'extra-button'} || $self->{'extra-label'}) {
+    if ($self->{'use_stderr'}) {
+      print STDERR ":e :extra\t\tSend the [Extra] signal\n";
+    } else {
+      print STDOUT ":e :extra\t\tSend the [Extra] signal\n";
+    }
+  }
+  if (!$self->{'nocancel'}) {
+    if ($self->{'use_stderr'}) {
+      print STDERR ":c :cancel\t\tSend the [Cancel] signal\n";
+    } else {
+      print STDOUT ":c :cancel\t\tSend the [Cancel] signal\n";
+    }
+  }
+  if ($self->{'help-button'} || $self->{'help-label'}) {
+    if ($self->{'use_stderr'}) {
+      print STDERR ":h :help\t\tSend the [Help] signal\n";
+    } else {
+      print STDOUT ":h :help\t\tSend the [Help] signal\n";
+    }
+  }
+  if ($self->{'use_stderr'}) {
+    print STDERR ("~" x 79)."\n";
+  } else {
+    print STDOUT ("~" x 79)."\n";
+  }
 }
 
 #: this returns the labels (or ' ') for the "extra", "help" and
@@ -486,10 +547,13 @@ $text
 +-----------------------------------------------------------------------------+
 .
   no strict 'subs';
+  my $_fh = select();
+  select(STDERR) unless not $self->{'use_stderr'};
   my $LFMT = $~;
   $~ = ASCIIPGTXT;
   write();
   $~= $LFMT;
+  select($_fh) unless not $self->{'use_stderr'};
   use strict 'subs';
 }
 
@@ -546,10 +610,13 @@ $extra,$cancel,$help
 +-----------------------------------------------------------------------------+
 .
   no strict 'subs';
+  my $_fh = select();
+  select(STDERR) unless not $self->{'use_stderr'};
   my $LFMT = $~;
   $~ = ASCIIPGMNU;
   write();
   $~= $LFMT;
+  select($_fh) unless not $self->{'use_stderr'};
   use strict 'subs';
 }
 
@@ -624,10 +691,13 @@ $extra,$cancel,$help
 +-----------------------------------------------------------------------------+
 .
   no strict 'subs';
+  my $_fh = select();
+  select(STDERR) unless not $self->{'use_stderr'};
   my $LFMT = $~;
   $~ = ASCIIPGLST;
   write();
   $~= $LFMT;
+  select($_fh) unless not $self->{'use_stderr'};
   use strict 'subs';
 }
 
@@ -641,12 +711,29 @@ sub __CLEAR {
   $self->clear();
 }
 
+#: this is an internal function to call all the callbacks
+sub __CALLBACKS {
+  my $self = shift();
+  my $opt = shift();
+  &{$self->{'handlers'}->{'HELP'}} if $self->state() eq "HELP" and ref($self->{'handlers'}->{'HELP'}) eq "CODE" and !$opt->{'do-not-help'};
+  &{$self->{'handlers'}->{'EXTRA'}} if $self->state() eq "EXTRA" and ref($self->{'handlers'}->{'EXTRA'}) eq "CODE" and !$opt->{'do-not-extra'};
+  &{$self->{'handlers'}->{'ESC'}} if $self->state() eq "ESC" and ref($self->{'handlers'}->{'ESC'}) eq "CODE" and !$opt->{'do-not-esc'};
+  &{$self->{'handlers'}->{'CANCEL'}} if $self->state() eq "CANCEL" and ref($self->{'handlers'}->{'CANCEL'}) eq "CODE" and !$opt->{'do-not-cancel'};
+}
+
 #: this is an interal function called by all widgets just before
 #: the widget is routed (to either ascii or dialog variant) and will
-#: beep if 'beep' is set or if an argument is passed in.
+#: beep if 'beep' is set in eith self or cfg.
 sub __BEEP {
   my $self = shift();
-  if (($self->{'beep'}||shift()) && !$self->is_cdialog()) { print STDOUT "\a"; }
+  my $cfg = shift();
+  if (($self->{'beep'}||$cfg->{'beep'}) && !$self->is_cdialog()) {
+    if ($self->{'use_stderr'}) {
+      print STDERR "\a";
+    } else {
+      print STDOUT "\a";
+    }
+  }
 }
 
 #: this is called by all widgets and simply resets all the attibs to
@@ -994,7 +1081,7 @@ sub clear {
 sub yesno {
   my $self = shift();
   my $cfg = shift();
-  $self->__BEEP($cfg->{'beep'});
+  $self->__BEEP($cfg);
   if ($self->{'ascii'}) { return($self->__ascii_yesno($cfg)); }
   else { return($self->__dialog_yesno($cfg)); }
 }
@@ -1015,7 +1102,11 @@ sub __ascii_yesno {
   while ($RESP !~ /^(y|yes|n|no)$/i) {
     $self->clear() if $self->{'auto-clear'};
     $self->__ASCII_WRITE_TEXT({'text'=>$self->{'text'}});
-    print STDOUT "(".$YN."): ";
+    if ($self->{'use_stderr'}) {
+      print STDERR "(".$YN."): ";
+    } else {
+      print STDOUT "(".$YN."): ";
+    }
     chomp($RESP = <STDIN>);
     if (!$RESP && $self->{'defaultno'}) { $RESP = "no"; }
     elsif (!$RESP && !$self->{'defaultno'}) { $RESP = "yes"; }
@@ -1023,6 +1114,7 @@ sub __ascii_yesno {
     else { $self->{'return_value'} = 1; }
   }
   $self->__CLEAR();
+  $self->__CALLBACKS({'do-not-cancel'=>1});
   return(1) if $self->state() eq "OK";
   return(0);
 }
@@ -1038,6 +1130,7 @@ sub __dialog_yesno {
   $attrs .= " ".$self->{'height'}." ".$self->{'width'};
   $self->__RUN_DIALOG($attrs);
   $self->__CLEAR();
+  $self->__CALLBACKS({'do-not-cancel'=>1});
   return(1) if $self->state() eq "OK";
   return(0);
 }
@@ -1046,7 +1139,7 @@ sub __dialog_yesno {
 sub msgbox {
   my $self = shift();
   my $cfg = shift();
-  $self->__BEEP($cfg->{'beep'});
+  $self->__BEEP($cfg);
   if ($self->{'ascii'}) { return($self->__ascii_msgbox($cfg)); }
   else { return($self->__dialog_msgbox($cfg)); }
 }
@@ -1057,10 +1150,15 @@ sub __ascii_msgbox {
   $self->__CLEAN_ATTRS();
   $self->__ATTRIBUTE($cfg);
   $self->__ASCII_WRITE_TEXT({'text'=>$self->{'text'}});
-  print STDOUT (" " x 25)."[ Press Enter to Continue ]";
+  if ($self->{'use_stderr'}) {
+    print STDERR (" " x 25)."[ Press Enter to Continue ]";
+  } else {
+    print STDOUT (" " x 25)."[ Press Enter to Continue ]";
+  }
   my $junk = <STDIN>;
   $self->{'return_value'} = 0;
   $self->__CLEAR();
+  $self->__CALLBACKS();
   return($self->rv());
 }
 sub __dialog_msgbox {
@@ -1075,6 +1173,7 @@ sub __dialog_msgbox {
   $attrs .= " ".$self->{'height'}." ".$self->{'width'};
   $self->__RUN_DIALOG($attrs);
   $self->__CLEAR();
+  $self->__CALLBACKS();
   return($self->rv());
 }
 
@@ -1082,7 +1181,7 @@ sub __dialog_msgbox {
 sub infobox {
   my $self = shift();
   my $cfg = shift();
-  $self->__BEEP($cfg->{'beep'});
+  $self->__BEEP($cfg);
   if ($self->{'ascii'}) { return($self->__ascii_infobox($cfg)); }
   else { return($self->__dialog_infobox($cfg)); }
 }
@@ -1095,12 +1194,13 @@ sub __ascii_infobox {
   $self->__ASCII_WRITE_TEXT({'text'=>$self->{'text'}});
   $self->{'return_value'} = 0;
   $self->__CLEAR();
+  $self->__CALLBACKS();
   return($self->rv());
 }
 sub __dialog_infobox {
   my $self = shift();
   my $cfg = shift();
-  if ($self->is_whiptail() && $ENV{'DISPLAY'}) {
+  if ($self->is_whiptail()) {
     $cfg->{'sleep'} = 0 if $cfg->{'sleep'};
     return($self->msgbox($cfg));
   }
@@ -1113,6 +1213,7 @@ sub __dialog_infobox {
   $attrs .= " ".$self->{'height'}." ".$self->{'width'};
   $self->__RUN_DIALOG($attrs);
   $self->__CLEAR();
+  $self->__CALLBACKS();
   return($self->rv());
 }
 
@@ -1120,7 +1221,7 @@ sub __dialog_infobox {
 sub inputbox {
   my $self = shift();
   my $cfg = shift();
-  $self->__BEEP($cfg->{'beep'});
+  $self->__BEEP($cfg);
   if ($self->{'ascii'}) { return($self->__ascii_inputbox($cfg)); }
   else { return($self->__dialog_inputbox($cfg)); }
 }
@@ -1135,14 +1236,26 @@ sub __ascii_inputbox {
   chomp($text);
   while($length > $self->{'max-input'}) {
     $self->__ASCII_WRITE_TEXT({'text'=>$self->{'text'}});
-    print STDOUT "input: ";
+    if ($self->{'use_stderr'}) {
+      print STDERR "input: ";
+    } else {
+      print STDOUT "input: ";
+    }
     chomp($self->{'return_string'} = <STDIN>);
     $length = length($self->{'return_string'});
-    if ($length > $self->{'max-input'}) { print STDOUT "error: too many charaters input,".
-					   " the maximum is: ".$self->{'max-input'}."\n"; }
+    if ($length > $self->{'max-input'}) {
+      if ($self->{'use_stderr'}) {
+	print STDERR "error: too many charaters input,".
+	 " the maximum is: ".$self->{'max-input'}."\n";
+      } else {
+	print STDOUT "error: too many charaters input,".
+	 " the maximum is: ".$self->{'max-input'}."\n";
+      }
+    }
   }
   $self->{'return_value'} = 0;
   $self->__CLEAR();
+  $self->__CALLBACKS();
   return($self->rs());
 }
 sub __dialog_inputbox {
@@ -1160,6 +1273,7 @@ sub __dialog_inputbox {
   while ($length > $self->{'max-input'}) {
     $self->__RUN_DIALOG($attrs,'string');
     $self->__CLEAR();
+    $self->__CALLBACKS();
     $length = length($self->{'return_string'});
     if ($length > $self->{'max-input'}) {
       $self->msgbox({'title'=>'error',
@@ -1174,7 +1288,7 @@ sub __dialog_inputbox {
 sub passwordbox {
   my $self = shift();
   my $cfg = shift();
-  $self->__BEEP($cfg->{'beep'});
+  $self->__BEEP($cfg);
   if ($self->{'ascii'}) { return($self->__ascii_passwordbox($cfg)); }
   else { return($self->__dialog_passwordbox($cfg)); }
 }
@@ -1187,25 +1301,44 @@ sub __ascii_passwordbox {
   my ($length,$key) = ($self->{'max-input'} + 1,'');
   my $text = $self->{'text'};
   chomp($text);
+  my $ENV_PATH = $ENV{'PATH'};
+  $ENV{'PATH'} = "";
   while ($length > $self->{'max-input'}) {
     $self->__ASCII_WRITE_TEXT({'text'=>$self->{'text'}});
-    print STDOUT "input: ";
-    if ($self->is_bsd()) { system "stty cbreak </dev/tty >/dev/tty 2>&1"; }
-    else { system "stty", '-icanon', 'eol', "\001"; }
+    if ($self->{'use_stderr'}) {
+      print STDERR "input: ";
+    } else {
+      print STDOUT "input: ";
+    }
+    if ($self->is_bsd()) { system "$self->{'sttybin'} cbreak </dev/tty >/dev/tty 2>&1"; }
+    else { system $self->{'sttybin'}, '-icanon', 'eol', "\001"; }
     while($key = getc(STDIN)) {
       last if $key =~ /\n/;
-      print STDOUT "\b*";
+      if ($self->{'use_stderr'}) {
+	print STDERR "\b*";
+      } else {
+	print STDOUT "\b*";
+      }
       $self->{'return_string'} .= $key;
     }
-    if ($self->is_bsd()) { system "stty -cbreak </dev/tty >/dev/tty 2>&1"; }
-    else { system "stty", 'icanon', 'eol', '^@'; }
+    if ($self->is_bsd()) { system "$self->{'sttybin'} -cbreak </dev/tty >/dev/tty 2>&1"; }
+    else { system $self->{'sttybin'}, 'icanon', 'eol', '^@'; }
     if ($self->{'return_string'}) { $length = length($self->{'return_string'}); }
     else { $length = 0; }
-    if ($length > $self->{'max-input'}) { print STDOUT "error: too many charaters input,".
-					   " the maximum is: ".$self->{'max-input'}."\n"; }
+    if ($length > $self->{'max-input'}) {
+      if ($self->{'use_stderr'}) {
+	print STDERR "error: too many charaters input,".
+	 " the maximum is: ".$self->{'max-input'}."\n";
+      } else {
+	print STDOUT "error: too many charaters input,".
+	 " the maximum is: ".$self->{'max-input'}."\n";
+      }
+    }
   }
+  $ENV{'PATH'} = $ENV_PATH;
   $self->{'return_value'} = 0;
   $self->__CLEAR();
+  $self->__CALLBACKS();
   return($self->rs());
 }
 sub __dialog_passwordbox {
@@ -1224,6 +1357,7 @@ sub __dialog_passwordbox {
   while ($length > $self->{'max-input'}) {
     $self->__RUN_DIALOG($attrs,'string');
     $self->__CLEAR();
+    $self->__CALLBACKS();
     $length = length($self->{'return_string'});
     if ($length > $self->{'max-input'}) {
       $self->msgbox({'title'=>'error',
@@ -1238,7 +1372,7 @@ sub __dialog_passwordbox {
 sub textbox {
   my $self = shift();
   my $cfg = shift();
-  $self->__BEEP($cfg->{'beep'});
+  $self->__BEEP($cfg);
   if ($self->{'ascii'}) { return($self->__ascii_textbox($cfg)); }
   else { return($self->__dialog_textbox($cfg)); }
 }
@@ -1249,6 +1383,8 @@ sub __ascii_textbox {
   $self->__CLEAN_ATTRS();
   $self->__ATTRIBUTE($cfg);
   if (-r $cfg->{'file'}) {
+    my $ENV_PATH = $ENV{'PATH'};
+    $ENV{'PATH'} = "";
     if ($ENV{'PAGER'}) {
       system($ENV{'PAGER'}." ".$cfg->{'file'});
     } elsif (-x $self->{'pager'}) {
@@ -1259,13 +1395,19 @@ sub __ascii_textbox {
       my $data = <ATBFILE>;
       close(ATBFILE);
       $/ = $TS;
-      print STDOUT $data;
+      if ($self->{'use_stderr'}) {
+	print STDERR $data;
+      } else {
+	print STDOUT $data;
+      }
     }
+    $ENV{'PATH'} = $ENV_PATH;
   } else {
-    return($self->msgbox({'title'=>'error','text'=>$self->{'file'}.' is not a readable text file.'}));
+    return($self->msgbox({'title'=>'error','text'=>$cfg->{'file'}.' is not a readable text file.'}));
   }
   $self->{'return_value'} = 0;
   $self->__CLEAR();
+  $self->__CALLBACKS();
   return($self->rs());
 }
 sub __dialog_textbox {
@@ -1296,6 +1438,7 @@ sub __dialog_textbox {
   unlink($self->{'file'}) if $self->{'file'} && -e $self->{'file'};
   $self->{'file'} = $self->{'rf'};  undef($self->{'rf'});
   $self->__CLEAR();
+  $self->__CALLBACKS();
   return($self->rv());
 }
 
@@ -1308,7 +1451,7 @@ sub menu {
   } elsif (ref($cfg->{'list'}) eq "ARRAY") {
     $self->__TEST_MENU_ARGS($cfg->{'list'}) or return();
   }
-  $self->__BEEP($cfg->{'beep'});
+  $self->__BEEP($cfg);
   if ($self->{'ascii'}) { return($self->__ascii_menu($cfg)); }
   else { return($self->__dialog_menu($cfg)); }
 }
@@ -1345,7 +1488,11 @@ sub __ascii_menu {
   while (!$rs) {
     $self->__ASCII_WRITE_MENU({'title'=>$self->{'title'},'text'=>$self->{'text'},
 			       'menu'=>$realm->[($pg - 1||0)]});
-    print STDOUT "(".$pg."/".@{$realm}."): ";
+    if ($self->{'use_stderr'}) {
+      print STDERR "(".$pg."/".@{$realm}."): ";
+    } else {
+      print STDOUT "(".$pg."/".@{$realm}."): ";
+    }
     chomp($rs = <STDIN>);
     if ($rs =~ /^:\?$/i) {
       $self->__CLEAR();
@@ -1356,19 +1503,23 @@ sub __ascii_menu {
       $self->__CLEAR();
       undef($rs);
       $self->{'return_value'} = 255;
+      $self->__CALLBACKS();
       return($self->rv());
     } elsif (($self->{'extra-button'} || $self->{'extra-label'}) && $rs =~ /^:(e|extra)$/i) {
       $self->{'return_value'} = 3;
+      $self->__CALLBACKS();
       return($self->state());
     } elsif ($self->{'help-button'} && $rs =~ /^:(h|help)$/i) {
       $self->__CLEAR();
       undef($rs);
       $self->{'return_value'} = 2;
+      $self->__CALLBACKS();
       return($self->rv());
     } elsif (!$self->{'nocancel'} && $rs =~ /^:(c|cancel)$/i) {
       $self->__CLEAR();
       undef($rs);
       $self->{'return_value'} = 1;
+      $self->__CALLBACKS();
       return($self->rv());
     } elsif ($rs =~ /^:pg\s*(\d+)$/i) {
       my $p = $1;
@@ -1391,6 +1542,7 @@ sub __ascii_menu {
 
   $self->{'return_value'} = 0;
   $self->__CLEAR();
+  $self->__CALLBACKS();
   return($self->rs());
 }
 sub __dialog_menu {
@@ -1402,13 +1554,15 @@ sub __dialog_menu {
   if (!$self->is_cdialog()) {
     if ($cfg->{'extra-button'} || $cfg->{'extra-label'} ||
 	$self->{'extra-button'} || $self->{'extra-label'}) {
-      push(@{$cfg->{'menu'}},":e",($cfg->{'extra-label'}||$self->{'extra-label'}||"Extra"));
+      push(@{$cfg->{'menu'}},":e",($cfg->{'extra-label'}||$self->{'extra-label'}||"Extra"))
+       unless grep { /^\:e$/ } @{$cfg->{'menu'}};
       undef($cfg->{'extra-label'});
       undef($cfg->{'extra-button'});
     }
     if ($cfg->{'help-button'} || $cfg->{'help-label'} ||
 	$self->{'help-button'} || $self->{'help-label'}) {
-      push(@{$cfg->{'menu'}},":h",($cfg->{'help-label'}||$self->{'help-label'}||"Help"));
+      push(@{$cfg->{'menu'}},":h",($cfg->{'help-label'}||$self->{'help-label'}||"Help"))
+       unless grep { /^\:h$/ } @{$cfg->{'menu'}};
       undef($cfg->{'help-label'});
       undef($cfg->{'help-button'});
     }
@@ -1421,6 +1575,7 @@ sub __dialog_menu {
   $attrs .= ' "'.join('" "',@{$cfg->{'menu'}}).'"';
   $self->__RUN_DIALOG($attrs,'string');
   $self->__CLEAR();
+  $self->__CALLBACKS();
   if ($self->rs() eq ":e") {
     $self->{'return_value'} = 3;
     return($self->state());
@@ -1440,7 +1595,7 @@ sub radiolist {
   } elsif (ref($cfg->{'list'}) eq "ARRAY") {
     $self->__TEST_LIST_ARGS($cfg->{'list'}) or return();
   }
-  $self->__BEEP($cfg->{'beep'});
+  $self->__BEEP($cfg);
   if ($self->{'ascii'}) { return($self->__ascii_radiolist($cfg)); }
   else { return($self->__dialog_radiolist($cfg)); }
 }
@@ -1476,7 +1631,11 @@ sub __ascii_radiolist {
   my $pg = 1;
   while (!$rs) {
     $self->__ASCII_WRITE_LIST({'text'=>$self->{'text'},'menu'=>$realm->[($pg - 1||0)]});
-    print STDOUT "(".$pg."/".@{$realm}."): ";
+    if ($self->{'use_stderr'}) {
+      print STDERR "(".$pg."/".@{$realm}."): ";
+    } else {
+      print STDOUT "(".$pg."/".@{$realm}."): ";
+    }
     chomp($rs = <STDIN>);
     if ($rs =~ /^:\?$/i) {
       $self->__CLEAR();
@@ -1487,19 +1646,23 @@ sub __ascii_radiolist {
       $self->__CLEAR();
       undef($rs);
       $self->{'return_value'} = 255;
+      $self->__CALLBACKS();
       return($self->rv());
     } elsif (($self->{'extra-button'} || $self->{'extra-label'}) && $rs =~ /^:(e|extra)$/i) {
       $self->{'return_value'} = 3;
+      $self->__CALLBACKS();
       return($self->state());
     } elsif ($self->{'help-button'} && $rs =~ /^:(h|help)$/i) {
       $self->__CLEAR();
       undef($rs);
       $self->{'return_value'} = 2;
+      $self->__CALLBACKS();
       return($self->rv());
     } elsif (!$self->{'nocancel'} && $rs =~ /^:(c|cancel)$/i) {
       $self->__CLEAR();
       undef($rs);
       $self->{'return_value'} = 1;
+      $self->__CALLBACKS();
       return($self->rv());
     } elsif ($rs =~ /^:pg\s*(\d+)$/i) {
       my $p = $1;
@@ -1518,10 +1681,12 @@ sub __ascii_radiolist {
       else { undef($rs); }
     }
     $self->__CLEAR();
+    $self->__CALLBACKS();
   }
 
   $self->{'return_value'} = 0;
   $self->__CLEAR();
+  $self->__CALLBACKS();
   return($self->rs());
 }
 sub __dialog_radiolist {
@@ -1533,13 +1698,15 @@ sub __dialog_radiolist {
   if (!$self->is_cdialog()) {
     if ($cfg->{'extra-button'} || $cfg->{'extra-label'} ||
 	$self->{'extra-button'} || $self->{'extra-label'}) {
-      push(@{$cfg->{'menu'}},":e",($cfg->{'extra-label'}||$self->{'extra-label'}||"Extra"),'off');
+      push(@{$cfg->{'menu'}},":e",($cfg->{'extra-label'}||$self->{'extra-label'}||"Extra"),'off')
+       unless grep { /^\:e$/ } @{$cfg->{'menu'}};
       undef($cfg->{'extra-label'});
       undef($cfg->{'extra-button'});
     }
     if ($cfg->{'help-button'} || $cfg->{'help-label'} ||
 	$self->{'help-button'} || $self->{'help-label'}) {
-      push(@{$cfg->{'menu'}},":h",($cfg->{'help-label'}||$self->{'help-label'}||"Help"),'off');
+      push(@{$cfg->{'menu'}},":h",($cfg->{'help-label'}||$self->{'help-label'}||"Help"),'off')
+       unless grep { /^\:h$/ } @{$cfg->{'menu'}};
       undef($cfg->{'help-label'});
       undef($cfg->{'help-button'});
     }
@@ -1562,16 +1729,17 @@ sub __dialog_radiolist {
   $attrs .= ' "'.join('" "',@{$menu}).'"';
   $self->__RUN_DIALOG($attrs,'string');
   $self->__CLEAR();
+  $self->__CALLBACKS();
   if ($self->is_gdialog || $self->is_kdialog()) {
     if ($self->rs() eq ":e") {
       $self->{'return_value'} = 3;
-      return($self->state());
+      $self->{'return_string'} = '';
     } elsif ($self->rs() eq ":h") {
       $self->{'return_value'} = 2;
-      return($self->state());
+      $self->{'return_string'} = '';
     }
   }
-  return($self->rs());
+  return(($self->rs()||$self->state()));
 }
 
 #: CHECKLIST
@@ -1583,7 +1751,7 @@ sub checklist {
   } elsif (ref($cfg->{'list'}) eq "ARRAY") {
     $self->__TEST_LIST_ARGS($cfg->{'list'}) or return();
   }
-  $self->__BEEP($cfg->{'beep'});
+  $self->__BEEP($cfg);
   if ($self->{'ascii'}) { return($self->__ascii_checklist($cfg)); }
   else { return($self->__dialog_checklist($cfg)); }
 }
@@ -1621,7 +1789,11 @@ sub __ascii_checklist {
   while ($go) {
     $self->__ASCII_WRITE_LIST({'title'=>$self->{'title'},'wm'=>'check',
 			       'text'=>$self->{'text'},'menu'=>$realm->[($pg - 1||0)]});
-    print STDOUT "(".$pg."/".@{$realm}."): ";
+    if ($self->{'use_stderr'}) {
+      print STDERR "(".$pg."/".@{$realm}."): ";
+    } else {
+      print STDOUT "(".$pg."/".@{$realm}."): ";
+    }
     chomp($rs = <STDIN>);
     if ($rs =~ /^:\?$/i) {
       $self->__CLEAR();
@@ -1632,19 +1804,23 @@ sub __ascii_checklist {
       $self->__CLEAR();
       undef($rs);
       $self->{'return_value'} = 255;
+      $self->__CALLBACKS();
       return($self->rv());
     } elsif (($self->{'extra-button'} || $self->{'extra-label'}) && $rs =~ /^:(e|extra)$/i) {
       $self->{'return_value'} = 3;
+      $self->__CALLBACKS();
       return($self->state());
     } elsif ($self->{'help-button'} && $rs =~ /^:(h|help)$/i) {
       $self->__CLEAR();
       undef($rs);
       $self->{'return_value'} = 2;
+      $self->__CALLBACKS();
       return($self->rv());
     } elsif (!$self->{'nocancel'} && $rs =~ /^:(c|cancel)$/i) {
       $self->__CLEAR();
       undef($rs);
       $self->{'return_value'} = 1;
+      $self->__CALLBACKS();
       return($self->rv());
     } elsif ($rs =~ /^:pg\s*(\d+)$/i) {
       my $p = $1;
@@ -1668,11 +1844,13 @@ sub __ascii_checklist {
       }
     }
     $self->__CLEAR();
+    $self->__CALLBACKS();
     undef($rs);
   }
 
   $self->{'return_value'} = 0;
   $self->__CLEAR();
+  $self->__CALLBACKS();
   return($self->ra());
 }
 sub __dialog_checklist {
@@ -1684,13 +1862,15 @@ sub __dialog_checklist {
   if (!$self->is_cdialog()) {
     if ($cfg->{'extra-button'} || $cfg->{'extra-label'} ||
 	$self->{'extra-button'} || $self->{'extra-label'}) {
-      push(@{$cfg->{'menu'}},":e",($cfg->{'extra-label'}||$self->{'extra-label'}||"Extra"),'off');
+      push(@{$cfg->{'menu'}},":e",($cfg->{'extra-label'}||$self->{'extra-label'}||"Extra"),'off')
+       unless grep { /^\:e$/ } @{$cfg->{'menu'}};
       undef($cfg->{'extra-label'});
       undef($cfg->{'extra-button'});
     }
     if ($cfg->{'help-button'} || $cfg->{'help-label'} ||
 	$self->{'help-button'} || $self->{'help-label'}) {
-      push(@{$cfg->{'menu'}},":h",($cfg->{'help-label'}||$self->{'help-label'}||"Help"),'off');
+      push(@{$cfg->{'menu'}},":h",($cfg->{'help-label'}||$self->{'help-label'}||"Help"),'off')
+       unless grep { /^\:h$/ } @{$cfg->{'menu'}};
       undef($cfg->{'help-label'});
       undef($cfg->{'help-button'});
     }
@@ -1703,23 +1883,24 @@ sub __dialog_checklist {
   $attrs .= ' "'.join('" "',@{$cfg->{'menu'}}).'"';
   $self->__RUN_DIALOG($attrs,'array');
   $self->__CLEAR();
+  $self->__CALLBACKS();
   if ($self->is_gdialog || $self->is_kdialog()) {
     if (grep { /^:e$/ } $self->ra()) {
       $self->{'return_value'} = 3;
-      return($self->state());
+      $self->{'return_array'} = undef();
     } elsif (grep { /^:h$/ } $self->ra()) {
       $self->{'return_value'} = 2;
-      return($self->state());
+      $self->{'return_array'} = undef();
     }
   }
-  return($self->ra());
+  return(($self->ra()||$self->state()));
 }
 
 #: CALENDAR
 sub calendar {
   my $self = shift();
   my $cfg = shift();
-  $self->__BEEP($cfg->{'beep'});
+  $self->__BEEP($cfg);
   if ($self->{'ascii'}) { return(); }
   else { return($self->__dialog_calendar($cfg)); }
 }
@@ -1738,6 +1919,7 @@ sub __dialog_calendar {
   $self->{'return_array'} = [split(/\//,$self->{'return_string'})];
   $self->{'return_value'} = $? >> 8;
   $self->__CLEAR();
+  $self->__CALLBACKS();
   return($self->ra());
 }
 
@@ -1745,7 +1927,7 @@ sub __dialog_calendar {
 sub fselect {
   my $self = shift();
   my $cfg = shift();
-  $self->__BEEP($cfg->{'beep'});
+  $self->__BEEP($cfg);
   if ($self->is_cdialog()) { return($self->__cdialog_fselect($cfg)); }
   else { return($self->__dialog_fselect($cfg)); }
 }
@@ -1756,11 +1938,13 @@ sub __cdialog_fselect {
   $self->__CLEAN_RVALUES();
   $self->__CLEAN_ATTRS();
   my $attrs = $self->__GET_ATTR_STR($cfg);
+  if (!$cfg->{'path'} || $cfg->{'path'} =~ /(\.|\.\/)$/) { $cfg->{'path'} = abs_path(); }
   $attrs .= " --fselect ";
   $attrs .= "\"".($cfg->{'path'}||"/")."\"";
   $attrs .= " ".$self->{'height'}." ".$self->{'width'};
   $self->__RUN_DIALOG($attrs,'string');
   $self->__CLEAR();
+  $self->__CALLBACKS();
   return($self->rs());
 }
 sub __dialog_fselect {
@@ -1771,14 +1955,27 @@ sub __dialog_fselect {
   $self->__CLEAN_ATTRS();
   my $attrs = $self->__GET_ATTR_STR($cfg);
   my $path = $cfg->{'path'};
+  if (!$path || $path =~ /(\.|\.\/)$/) { $path = abs_path(); }
   my $file;
   my ($menu,$list) = ([],[]);
  DDSEL: while (-d $path && ($self->state() ne "ESC" && $self->state() ne "CANCEL")) {
-    ($menu, $list) = $self->__GET_DIR($path);
+    ($menu, $list) = $self->__GET_DIR($path,['[enter new]']);
     $file = $self->menu({'height'=>$self->{'height'},'width'=>$self->{'width'},'list-height'=>$self->{'list-height'},
 			 'title'=>$self->{'title'},'text'=>$path,'menu'=>$menu});
     if ($file ne "") {
-      if ($list->[($file - 1 || 0)] eq "../") {
+      if ($list->[($file - 1 || 0)] eq "[enter new]") {
+	my $nfn;
+	while (!$nfn || -e $path."/".$nfn) {
+	  $nfn = $self->inputbox({'height'=>$self->{'height'},'width'=>$self->{'width'},
+				  'title'=>$self->{'title'},'text'=>'Enter a new name with a base directory of: '.$path});
+	  next DDSEL if $self->state() eq "ESC" or $self->state() eq "CANCEL";
+	  if (-e $path."/".$nfn) { $self->msgbox({'title'=>'error','text'=>$path."/".$nfn.' already exists! Choose another name please.'}); }
+	}
+	$file = $path."/".$nfn;
+	$file =~ s!/$!! unless $file =~ m!^/$!;
+	$file =~ s!/\./!/!g; $file =~ s!/+!/!g;
+	last DDSEL;
+      } elsif ($list->[($file - 1 || 0)] eq "../") {
 	$path = dirname($path);
       } elsif ($list->[($file - 1 || 0)] eq "./") {
 	$file = $path;
@@ -1800,6 +1997,7 @@ sub __dialog_fselect {
   $self->{'return_string'} = $file;
   $self->{'return_value'} = 0;
   $self->__CLEAR();
+  $self->__CALLBACKS();
   return($self->rs());
 }
 
@@ -1807,7 +2005,7 @@ sub __dialog_fselect {
 sub tailbox {
   my $self = shift();
   my $cfg = shift();
-  $self->__BEEP($cfg->{'beep'});
+  $self->__BEEP($cfg);
   if ($self->{'ascii'}) { $self->__ascii_tailbox($cfg); }
   else { return($self->__dialog_tailbox($cfg)); }
 }
@@ -1820,19 +2018,30 @@ sub __ascii_tailbox {
   $self->clear() if $self->{'auto-clear'};
   if (-r $cfg->{'file'}) {
     if (-x $self->{'tail'}) {
-      print STDOUT "+---------------------------------------------------------------------+\n";
-      my $string = "| Tailing:                                                            |";
-      substr($string,11,length($cfg->{'file'}),$cfg->{'file'});
-      print STDOUT $string."\n";
-      print STDOUT "|      *** Press <CONTROL> + <C> to exit 'tail' and return. ***       |\n";
-      print STDOUT "+---------------------------------------------------------------------+\n";
-      system($self->{'tail'}." ".$self->{'tailopt'}." ".$cfg->{'file'});
+      if ($self->{'use_stderr'}) {
+	print STDERR "+---------------------------------------------------------------------+\n";
+	my $string = "| Tailing:                                                            |";
+	substr($string,11,length($cfg->{'file'}),$cfg->{'file'});
+	print STDERR $string."\n";
+	print STDERR "|      *** Press <CONTROL> + <C> to exit 'tail' and return. ***       |\n";
+	print STDERR "+---------------------------------------------------------------------+\n";
+	system($self->{'tail'}." ".$self->{'tailopt'}." ".$cfg->{'file'}." 1>2&");
+      } else {
+	print STDOUT "+---------------------------------------------------------------------+\n";
+	my $string = "| Tailing:                                                            |";
+	substr($string,11,length($cfg->{'file'}),$cfg->{'file'});
+	print STDOUT $string."\n";
+	print STDOUT "|      *** Press <CONTROL> + <C> to exit 'tail' and return. ***       |\n";
+	print STDOUT "+---------------------------------------------------------------------+\n";
+	system($self->{'tail'}." ".$self->{'tailopt'}." ".$cfg->{'file'});
+      }
     } else { $self->textbox($cfg); }
   } else {
     return($self->msgbox({'title'=>'error','text'=>$self->{'file'}.' is not a readable text file.'}));
   }
   $self->{'return_value'} = 0;
   $self->__CLEAR();
+  $self->__CALLBACKS();
   return($self->rs());
 }
 sub __dialog_tailbox {
@@ -1851,6 +2060,7 @@ sub __dialog_tailbox {
   $attrs .= " ".$self->{'height'}." ".$self->{'width'};
   $self->__RUN_DIALOG($attrs);
   $self->__CLEAR();
+  $self->__CALLBACKS();
   return($self->rv());
 }
 
@@ -1858,7 +2068,7 @@ sub __dialog_tailbox {
 sub timebox {
   my $self = shift();
   my $cfg = shift();
-  $self->__BEEP($cfg->{'beep'});
+  $self->__BEEP($cfg);
   if ($self->{'ascii'}) { return(); }
   else { return($self->__dialog_timebox($cfg)); }
 }
@@ -1877,6 +2087,7 @@ sub __dialog_timebox {
   $self->__RUN_DIALOG($attrs,'string');
   $self->{'return_array'} = [split(/:/,$self->{'return_string'})];
   $self->__CLEAR();
+  $self->__CALLBACKS();
   return($self->ra());
 }
 
@@ -1886,7 +2097,7 @@ sub start_gauge {
   my $cfg = shift();
   return(254) if defined $self->{'__GAUGE'};
   return() unless !$self->is_gdialog() and !$self->is_kdialog();
-  $self->__BEEP($cfg->{'beep'});
+  $self->__BEEP($cfg);
   $self->__CLEAN_RVALUES();
   $self->__CLEAN_ATTRS();
   my $attrs = $self->__GET_ATTR_STR($cfg);
@@ -3157,6 +3368,16 @@ not 100% accurate but none the less useful.
  | tail         | force a tail binary for ascii mode     |
  | tailopt      | specify the tail continuous read opt.  |
  | tmpdir       | path to a valid temp directory         |
+ | sttybin      | path to an stty binary                 |
+ | use_stderr   | make ascii mode output to stderr       |
+ | tmpdir       | path to a valid temp directory         |
+ +--------------+----------------------------------------+
+ | Callback Attributes                                   |
+ +--------------+----------------------------------------+
+ | HELP-SUB     | a coderef evaluated on "HELP" signal   |
+ | EXTRA-SUB    | a coderef evaluated on "EXTRA" signal  |
+ | ESC-SUB      | a coderef evaluated on "ESC" signal    |
+ | CANCEL-SUB   | a coderef evaluated on "CANCEL" signal |
  +--------------+----------------------------------------+
 
 * = sleep and beep are handled by UDPM instead of the dialog
@@ -3301,6 +3522,25 @@ command line option.
 
 =back
 
+=item sttybin => '/bin/stty'
+
+=over 6
+
+stty is the application used to manipulate the tty of the ascii-mode
+passwordbox widget.
+
+=back
+
+=item use_stderr => 0
+
+=over 6
+
+Set this to anything other than '0' (zero) and the ascii-mode widgets
+will print their interfaces to STDERR instead of STDOUT. This does not
+interfere with STDIN which is still used for input.
+
+=back
+
 =item tmpdir => '/tmp'
 
 =over 6
@@ -3310,6 +3550,64 @@ redirecting their output (using the normal conventions). All temporary
 files are deleted but if the user performs a "harsh-break" (hitting
 ctrl+c many times etc.) there is a chance that some null files may be
 left around.
+
+=back
+
+=back
+
+=head1 REGARDING 'Callback' ATTRIBUTES
+
+=over 2
+
+These attributes are only used once during object construction and
+cannot be modified during the life of the object (this may change in
+future versions). These 'Callback' functions are simply signal
+handlers for the four main signals; "HELP", "EXTRA", "ESC", and "CANCEL".
+
+When using these 'Callback' functions be sure to use a secondary UDPM
+object within them instead of calling widgets with the same UDPM object
+that these callbacks are being assigned to. When you do use the same object
+in the callbacks the state() and other such variables _are_ modified and
+this can cause logical problems. Having a secondary UDPM object just for the
+callbacks isn't a "Bad Thing (tm)" but does add overhead.
+
+=back
+
+=over 4
+
+=item HELP-SUB => \&HELP_SUB_FUNC
+
+=over 6
+
+This code block will be evaluated every time the user selects an
+available "Help" button.
+
+=back
+
+=item EXTRA-SUB => \&EXTRA_SUB_FUNC
+
+=over 6
+
+This code block will be evaluated every time the user selects an
+available "Extra" button (regardless of it's label value).
+
+=back
+
+=item ESC-SUB => \&ESC_SUB_FUNC
+
+=over 6
+
+This code block will be evaluated every time the user presses (or
+selects) the "Esc" button.
+
+=back
+
+=item CANCEL-SUB => \&CANCEL_SUB_FUNC
+
+=over 6
+
+This code block will be evaluated every time the user selects an
+available "Cancel" button (regardless of it's label value).
 
 =back
 
@@ -3513,6 +3811,13 @@ not only is UDPM "dialog variant" independant, but having _any_
 fixed dimensions of 75 colums and 25 rows. In subsequent versions
 of UDPM there may be additional formats for all widgets (ie: "compact",
 "normal", "extended", or "custom").
+
+Be aware that the DELETE (or ^H) key may or may not work as expected when
+using ASCII mode. This is because input is handled by the simple
+"$input = <STDIN>;" statement. In later versions there will be a little
+more robust input handler implemented along with support for Readline
+(if already installed). Primarily the passwordbox() widget is affected
+by this limitation.
 
 =item NATIVE (ASCII) WIDGET NOTES
 
