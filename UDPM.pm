@@ -9,7 +9,7 @@ use File::Basename;
 use Cwd 'abs_path';
 use Carp;
 
-our $VERSION = '0.85';
+our $VERSION = '0.88';
 
 #
 # TODO:
@@ -212,7 +212,7 @@ sub __TEST_VARIANT {
     if ($str =~ /cdialog\s\(ComeOn\sDialog\!\)\sversion\s(\d+\.\d+.+)/) {
       # We consider cdialog to be a colour supporting version (0.9b-20030130)
       # all others are non-colourized and support only the base functionality :(
-      if ($1 =~ /20030130$/) { return("cdialog"); } # Debian Sid
+      if ($1 =~ /20030130|20030302|20030308$/) { return("cdialog"); } # Debian Sid
       if ($1 =~ /20020814$/) { return("dialog"); } # Debian Woody
       if ($1 =~ /20020519$/) { return("dialog"); } # RedHat 8
       return($bn); # unknown...
@@ -2102,7 +2102,7 @@ sub start_gauge {
   my $self = shift();
   my $cfg = shift();
   return(254) if defined $self->{'__GAUGE'};
-  return() unless !$self->is_gdialog() and !$self->is_kdialog();
+#  return() unless !$self->is_gdialog() and !$self->is_kdialog();
   $self->__BEEP($cfg);
   $self->__CLEAN_RVALUES();
   $self->__CLEAN_ATTRS();
@@ -2123,7 +2123,7 @@ sub msg_gauge {
   my $self = shift();
   my $mesg = shift() || return(0);
   return(254) unless defined $self->{'__GAUGE'};
-  return() unless !$self->is_gdialog() and !$self->is_kdialog() and !$self->is_whiptail();
+#  return() unless !$self->is_gdialog() and !$self->is_kdialog() and !$self->is_whiptail();
   $self->__BEEP();
   $self->__CLEAN_RVALUES();
   chomp($mesg);
@@ -2135,7 +2135,7 @@ sub inc_gauge {
   my $self = shift();
   my $incr = shift() || 1;
   return(254) unless defined $self->{'__GAUGE'};
-  return() unless !$self->is_gdialog() and !$self->is_kdialog();
+#  return() unless !$self->is_gdialog() and !$self->is_kdialog();
   $self->__CLEAN_RVALUES();
   chomp($incr);
   $self->{'percent'} += $incr;
@@ -2147,7 +2147,7 @@ sub dec_gauge {
   my $self = shift();
   my $decr = shift() || 1;
   return(254) unless defined $self->{'__GAUGE'};
-  return() unless !$self->is_gdialog() and !$self->is_kdialog();
+#  return() unless !$self->is_gdialog() and !$self->is_kdialog();
   $self->__CLEAN_RVALUES();
   chomp($decr);
   $self->{'percent'} -= $decr;
@@ -2159,7 +2159,7 @@ sub set_gauge {
   my $self = shift();
   my $value = shift();
   return(254) unless defined $self->{'__GAUGE'};
-  return() unless !$self->is_gdialog() and !$self->is_kdialog();
+#  return() unless !$self->is_gdialog() and !$self->is_kdialog();
   $self->__CLEAN_RVALUES();
   chomp($value);
   $self->{'percent'} = $value;
@@ -2170,7 +2170,7 @@ sub set_gauge {
 sub end_gauge {
   my $self = shift();
   return(254) unless defined $self->{'__GAUGE'};
-  return() unless !$self->is_gdialog() and !$self->is_kdialog();
+#  return() unless !$self->is_gdialog() and !$self->is_kdialog();
   $self->__CLEAN_RVALUES();
   my $fh = $self->{'__GAUGE'};
   print $fh "\x04";
