@@ -1,6 +1,6 @@
 package UDPM;
 
-use 5.008;
+use 5.006;
 use strict;
 use warnings;
 use diagnostics;
@@ -9,7 +9,7 @@ use File::Basename;
 use Cwd 'abs_path';
 use Carp;
 
-our $VERSION = '0.80';
+our $VERSION = '0.85';
 
 #
 # TODO:
@@ -173,7 +173,8 @@ sub __CAT_ONCE {
     open(CAT,"<".$file) or return($file);
     $text = <CAT>;
     close($file);
-    $/ = $TS; #<-- bug! (was missing, now ok...)
+    $/ = $TS;
+    undef($TS);
     unlink($file);
     return($text);
   }
@@ -191,6 +192,7 @@ sub __TEST_VARIANTS {
     if ($ENV{'DISPLAY'}) { push(@variants,@{$self->{'gui-variants'}}); }
   }
   foreach my $variant (@variants) {
+    next unless $variant;
     if (-x $path."/".$variant) {
       $self->{'gui'} = 1 if grep { /^\Q$variant\E$/ } @{$self->{'gui-variants'}};
       return($path."/".$variant);
@@ -207,9 +209,13 @@ sub __TEST_VARIANT {
   elsif ($bn eq "whiptail" || $bn eq "gdialog" || $bn eq "ascii") { return($bn); }
   elsif ($bn eq "dialog") {
     my $str = `$self->{'dialog'} --help 2>&1`;
-    if ($str =~ /cdialog\s\(ComeOn\sDialog\!\)\sversion\s(\d+\.\d+)/) {
-      if ($1 > 0) { return("cdialog"); } # > 0.9
-      if ($1 == 0 && $2 >= 9) { return("cdialog"); } # == 0.9
+    if ($str =~ /cdialog\s\(ComeOn\sDialog\!\)\sversion\s(\d+\.\d+.+)/) {
+      # We consider cdialog to be a colour supporting version (0.9b-20030130)
+      # all others are non-colourized and support only the base functionality :(
+      if ($1 =~ /20030130$/) { return("cdialog"); } # Debian Sid
+      if ($1 =~ /20020814$/) { return("dialog"); } # Debian Woody
+      if ($1 =~ /20020519$/) { return("dialog"); } # RedHat 8
+      return($bn); # unknown...
     } else { return($bn); }
   }
 }
@@ -4171,18 +4177,18 @@ Kevin C. Krinke, E<lt>kckrinke@opendoorsoftware.comE<gt>
 
  Copyright (C) 2002  Kevin C. Krinke <kckrinke@opendoorsoftware.com>
 
- This program is free software; you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation; either version 2 of the License, or
- any later version.
+ This library is free software; you can redistribute it and/or
+ modify it under the terms of the GNU Lesser General Public
+ License as published by the Free Software Foundation; either
+ version 2.1 of the License, or (at your option) any later version.
 
- This program is distributed in the hope that it will be useful,
+ This library is distributed in the hope that it will be useful,
  but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ Lesser General Public License for more details.
 
- You should have received a copy of the GNU General Public License
- along with this program; if not, write to the Free Software
+ You should have received a copy of the GNU Lesser General Public
+ License along with this library; if not, write to the Free Software
  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 =cut
