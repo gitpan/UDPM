@@ -1,0 +1,8 @@
+Revision history for Perl extension UDPM.
+
+0.75  Mon Dec 23 00:42:38 2002
+	- Initial CPAN Packaging.
+
+0.50  Wed Dec 18 03:45:22 2002
+	- Complete re-write (from scratch)
+	- unified all code into one PM
